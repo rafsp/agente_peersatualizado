@@ -37,11 +37,13 @@
     - **Acoplamento e Testabilidade:** Avalie o quão fortemente acoplado o código está, pois isso impacta diretamente a capacidade de escrever testes de unidade isolados.
     - **Estratégia Implícita:** Com base nos testes existentes (se houver) ou na estrutura do código, infira a estratégia de testes. Há um bom 
     balanço entre testes de unidade (rápidos e baratos) e testes de integração (lentos e caros)? O código parece projetado para ser testado?
+    - **NÂO ESCREVA nenhum tipo de teste apenas indique mudança que facilite a escrita de teste**
 
 # TAREFAS FINAIS
 - traga a análise direta em cada tópico e ao final traga uma tabela mostrando quais arquivos vão mudar em uma coluna, e na outra coluna relatando o que deve mudar
 - traga também o grau de severidade de desalinhamento, entre o código e boas práticas, leve, moderado ou severo
 - o retorno dever ser em formato de markdown pois quero transformar essa respota em um relatório formal
+- SIGA estritamente as instruções fornecidas nesse documento, preciso que haja a maior constancia nos resultados se eu fornecer as mesmas entradas
 
 # CÓDIGO-FONTE PARA ANÁLISE
 O código completo do repositório é fornecido abaixo no formato de um dicionário Python, onde as chaves são os caminhos completos dos arquivos e os valores são o conteúdo de cada arquivo.
