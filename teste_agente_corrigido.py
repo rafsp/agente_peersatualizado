@@ -52,7 +52,7 @@ try:
         tipo_analise='design',
         codigo=codigo_sample,
         analise_extra='Teste direto',
-        model_name='gpt-4',  # Trocar gpt-4.1 por gpt-4
+        model_name='gpt-4.1',  # Trocar gpt-4.1 por gpt-4
         max_token_out=500
     )
     print(f"✅ OpenAI: {len(resultado)} chars")

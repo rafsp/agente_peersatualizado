@@ -1,42 +1,64 @@
-# main.py - VERSÃO SIMPLIFICADA
+# main.py - Servidor principal integrado
 import os
 import sys
 import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-# Carregar variáveis de ambiente
 load_dotenv()
-
-# Adicionar o diretório atual ao path do Python
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Tentar carregar o backend integrado primeiro
 try:
-    # Importar a aplicação FastAPI
-    from mcp_server_fastapi import app
-    print("✅ Aplicação FastAPI importada com sucesso")
+    if os.path.exists("mcp_server_fastapi_integrado.py"):
+        from mcp_server_fastapi_integrado import app
+        backend_type = "INTEGRADO"
+        print("✅ Backend integrado carregado")
+    else:
+        from mcp_server_fastapi import app
+        backend_type = "ORIGINAL"
+        print("⚠️ Backend original carregado")
+        
 except ImportError as e:
-    print(f"❌ Erro ao importar aplicação FastAPI: {e}")
-    print("📋 Verifique se o arquivo mcp_server_fastapi.py existe e está correto")
+    print(f"❌ Erro ao importar: {e}")
     sys.exit(1)
 
-# REMOVER CORS DAQUI - já está no mcp_server_fastapi.py
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 if __name__ == "__main__":
-    # Configuração do servidor
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 8000))
     debug = os.getenv("DEBUG", "true").lower() == "true"
     
-    print("=" * 50)
-    print("🚀 BACKEND AGENTES_PEERS")
-    print("=" * 50)
+    print("\n" + "=" * 60)
+    print("🚀 BACKEND AGENTES PEERS")
+    print("=" * 60)
     print(f"🌐 Servidor: http://{host}:{port}")
-    print(f"📚 Documentação: http://{host}:{port}/docs")
-    print(f"❤️  Health Check: http://{host}:{port}/health")
-    print(f"🔧 Debug mode: {debug}")
-    print("=" * 50)
-    print("🛑 Para parar o servidor: Ctrl+C")
-    print("=" * 50)
+    print(f"📚 Docs: http://{host}:{port}/docs")
+    print(f"🔧 Tipo: {backend_type}")
+    print("=" * 60)
+    
+    if backend_type == "INTEGRADO":
+        print("🎉 BACKEND INTEGRADO ATIVO!")
+        print("💡 Agentes reais serão usados se disponíveis")
+    else:
+        print("⚠️ USANDO BACKEND ORIGINAL")
+        print("💡 Crie mcp_server_fastapi_integrado.py para integração")
+    
+    print("=" * 60)
+    print("🛑 Ctrl+C para parar")
+    print("=" * 60)
     
     try:
         uvicorn.run(
@@ -44,11 +66,9 @@ if __name__ == "__main__":
             host=host,
             port=port,
             reload=debug,
-            log_level="info" if debug else "warning",
-            access_log=debug
+            log_level="info"
         )
     except KeyboardInterrupt:
-        print("\n🛑 Servidor parado pelo usuário")
+        print("\n🛑 Servidor parado")
     except Exception as e:
-        print(f"❌ Erro ao iniciar servidor: {e}")
-        sys.exit(1)
+        print(f"❌ Erro: {e}")

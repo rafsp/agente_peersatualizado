@@ -49,7 +49,7 @@ def executar_analise_llm(
     tipo_analise: str,
     codigo: str,
     analise_extra: str = "",
-    model_name: str = "gpt-4o-mini",  # Modelo mais econômico por padrão
+    model_name: str = "gpt-4.1",  # Modelo mais econômico por padrão
     max_token_out: int = 3000
 ) -> str:
     """
@@ -133,7 +133,7 @@ def test_openai_connection():
     try:
         print("🧪 Testando conexão com OpenAI...")
         response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4.1",
             messages=[{"role": "user", "content": "Test"}],
             max_tokens=5
         )

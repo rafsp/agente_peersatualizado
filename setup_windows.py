@@ -156,7 +156,7 @@ OPENAI_API_KEY=sua_chave_openai_aqui
 GITHUB_TOKEN=seu_token_github_aqui
 
 # Configurações opcionais
-DEFAULT_MODEL=gpt-4o-mini
+DEFAULT_MODEL=gpt-4.1
 PORT=8000
 ENVIRONMENT=development
 """
