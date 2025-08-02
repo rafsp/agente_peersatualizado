@@ -4,6 +4,8 @@ import time
 from github import GithubException
 from tools import github_connector
 
+
+
 # O mapeamento permanece o mesmo
 MAPEAMENTO_TIPO_EXTENSOES = {
     "terraform": [".tf", ".tfvars"],
