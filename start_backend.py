@@ -56,7 +56,7 @@ def start_server():
         
         # Usar string de importação para evitar warning e manter rodando
         uvicorn.run(
-            "mcp_server_fastapi:app",
+            "mcp_server_fastapi",
             host="0.0.0.0",
             port=8000,
             reload=True,

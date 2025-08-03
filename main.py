@@ -1,35 +1,23 @@
-# main.py - Servidor principal integrado
+# main.py - Servidor principal
 import os
-import sys
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
+# Carregar variáveis de ambiente
 load_dotenv()
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Tentar carregar o backend integrado primeiro
-try:
-    if os.path.exists("mcp_server_fastapi_integrado.py"):
-        from mcp_server_fastapi_integrado import app
-        backend_type = "INTEGRADO"
-        print("✅ Backend integrado carregado")
-    else:
-        from mcp_server_fastapi import app
-        backend_type = "ORIGINAL"
-        print("⚠️ Backend original carregado")
-        
-except ImportError as e:
-    print(f"❌ Erro ao importar: {e}")
-    sys.exit(1)
+# Importar a aplicação FastAPI
+from mcp_server_fastapi import app
 
-# CORS
+# Configurar CORS para permitir conexões do frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",
+        "http://localhost:3000",  # Next.js dev server
         "http://127.0.0.1:3000",
-        "http://localhost:3001",
+        "http://localhost:3001",  # Caso use porta diferente
+        "https://your-frontend-domain.com",  # Adicione seu domínio de produção
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -37,38 +25,23 @@ app.add_middleware(
 )
 
 if __name__ == "__main__":
+    # Configuração do servidor
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 8000))
     debug = os.getenv("DEBUG", "true").lower() == "true"
     
     print("\n" + "=" * 60)
-    print("🚀 BACKEND AGENTES PEERS")
+    print("🚀 AGENTES PEERS - BACKEND")
     print("=" * 60)
-    print(f"🌐 Servidor: http://{host}:{port}")
+    print(f"📍 Servidor: http://{host}:{port}")
     print(f"📚 Docs: http://{host}:{port}/docs")
-    print(f"🔧 Tipo: {backend_type}")
-    print("=" * 60)
+    print(f"🔧 Debug: {debug}")
+    print("=" * 60 + "\n")
     
-    if backend_type == "INTEGRADO":
-        print("🎉 BACKEND INTEGRADO ATIVO!")
-        print("💡 Agentes reais serão usados se disponíveis")
-    else:
-        print("⚠️ USANDO BACKEND ORIGINAL")
-        print("💡 Crie mcp_server_fastapi_integrado.py para integração")
-    
-    print("=" * 60)
-    print("🛑 Ctrl+C para parar")
-    print("=" * 60)
-    
-    try:
-        uvicorn.run(
-            "main:app",
-            host=host,
-            port=port,
-            reload=debug,
-            log_level="info"
-        )
-    except KeyboardInterrupt:
-        print("\n🛑 Servidor parado")
-    except Exception as e:
-        print(f"❌ Erro: {e}")
+    uvicorn.run(
+        "main:app",
+        host=host,
+        port=port,
+        reload=debug,
+        log_level="info"
+    )
