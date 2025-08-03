@@ -1,77 +1,68 @@
-# teste_agente_corrigido.py
-import sys
-import os
-sys.path.append('.')
+# test_github_commit.py - CRIAR ESTE ARQUIVO PARA TESTAR
+"""
+Script para testar se a integração com GitHub está funcionando.
+Execute: python test_github_commit.py
+"""
 
-# IMPORTANTE: Executar fix primeiro
-import fix_imports
+from tools import commit_multiplas_branchs
 
-from agents import agente_revisor
-from tools import github_reader, revisor_geral
-
-exec(open('fix_imports.py').read())
-
-print("🧪 TESTE DIRETO DO FLUXO COMPLETO")
-print("=" * 50)
-
-# Agora importar com mock ativo
-try:
-    from agents import agente_revisor
-    from tools import github_reader, revisor_geral
-    print("✅ Imports realizados com sucesso")
-except Exception as e:
-    print(f"❌ Erro nos imports: {e}")
-    import traceback
-    traceback.print_exc()
-    exit()
-
-print("🧪 TESTE DIRETO DO FLUXO COMPLETO")
-print("=" * 50)
-
-# Teste 1: GitHub Reader diretamente
-print("1. Testando GitHub Reader...")
-try:
-    codigo = github_reader.main(
-        nome_repo='rafsp/api-springboot-web-app',
-        tipo_de_analise='design'
-    )
-    print(f"✅ GitHub: {len(codigo)} arquivos, {sum(len(c) for c in codigo.values())} chars")
-    print(f"📄 Primeiros arquivos: {list(codigo.keys())[:3]}")
-except Exception as e:
-    print(f"❌ GitHub falhou: {e}")
-    import traceback
-    traceback.print_exc()
-
-# Teste 2: Análise LLM diretamente  
-print("\n2. Testando OpenAI LLM...")
-try:
-    # Usar amostra pequena
-    codigo_sample = "def hello(): return 'Spring Boot App'"
+def test_simple_github_commit():
+    """Testa commit simples no GitHub"""
     
-    resultado = revisor_geral.executar_analise_llm(
-        tipo_analise='design',
-        codigo=codigo_sample,
-        analise_extra='Teste direto',
-        model_name='gpt-4.1',  # Trocar gpt-4.1 por gpt-4
-        max_token_out=500
-    )
-    print(f"✅ OpenAI: {len(resultado)} chars")
-    print(f"Preview: {resultado[:200]}...")
-except Exception as e:
-    print(f"❌ OpenAI falhou: {e}")
-    import traceback
-    traceback.print_exc()
+    # Dados de teste mínimos
+    test_data = {
+        "resumo_geral": "Teste de commit automático",
+        "grupos": [
+            {
+                "branch_sugerida": "test/automated-commit",
+                "titulo_pr": "Teste de Commit Automático",
+                "resumo_do_pr": "Este é um teste para verificar se o sistema consegue fazer commits no GitHub.",
+                "conjunto_de_mudancas": [
+                    {
+                        "caminho_do_arquivo": "TEST_AUTOMATION.md",
+                        "status": "CRIADO",
+                        "conteudo": """# Teste de Automação
 
-# Teste 3: Agente completo
-print("\n3. Testando agente completo...")
-try:
-    resultado = agente_revisor.main(
-        tipo_analise='design',
-        repositorio='rafsp/api-springboot-web-app'
-    )
-    print(f"✅ Agente: {len(str(resultado))} chars")
-    print(f"Preview: {str(resultado)[:300]}...")
-except Exception as e:
-    print(f"❌ Agente falhou: {e}")
-    import traceback
-    traceback.print_exc()
+Este arquivo foi criado automaticamente pelo sistema de agentes.
+
+## Data e Hora
+Teste executado em: $(date)
+
+## Objetivo
+Verificar se o sistema consegue:
+- ✅ Conectar ao GitHub
+- ✅ Criar uma nova branch
+- ✅ Fazer commit de arquivos
+- ✅ Criar Pull Request
+
+## Status
+Se você está vendo este arquivo, o teste foi bem-sucedido!
+""",
+                        "justificativa": "Arquivo de teste criado para verificar a funcionalidade de commit automático."
+                    }
+                ]
+            }
+        ]
+    }
+    
+    repo_name = "rafsp/Aula3103_CSHARP"  # Use o mesmo repo que estava testando
+    
+    print("🧪 Iniciando teste de commit no GitHub...")
+    print(f"📁 Repositório: {repo_name}")
+    print(f"🌿 Branch: {test_data['grupos'][0]['branch_sugerida']}")
+    print(f"📄 Arquivo: {test_data['grupos'][0]['conjunto_de_mudancas'][0]['caminho_do_arquivo']}")
+    
+    try:
+        commit_multiplas_branchs.processar_e_subir_mudancas_agrupadas(
+            nome_repo=repo_name,
+            dados_agrupados=test_data
+        )
+        print("✅ Teste concluído! Verifique seu GitHub.")
+        
+    except Exception as e:
+        print(f"❌ Erro no teste: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    test_simple_github_commit()
