@@ -140,7 +140,7 @@ def show_next_steps():
     print("4. 📖 Acesse a documentação: http://localhost:8000/docs")
     print("\n💡 DICAS:")
     print("• Mantenha o arquivo .env seguro (nunca commite no Git)")
-    print("• Use gpt-4o-mini para economizar créditos da OpenAI")
+    print("• Use gpt-4.1 para economizar créditos da OpenAI")
     print("• Configure rate limits se necessário")
     print("\n🆘 SUPORTE:")
     print("• Documentação: README.md")

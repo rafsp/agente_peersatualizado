@@ -1,603 +1,505 @@
-# mcp_server_fastapi.py - Backend Integrado com Agentes do Cientista de Dados
+# mcp_server_fastapi.py - BACKEND COM AGENTES REAIS (SEM SIMULAÇÃO)
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, Dict, List
 import json
 import uuid
 import time
 import asyncio
+import threading
+from typing import Optional, Literal, Dict, Any
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Path
+from pydantic import BaseModel, Field
+from fastapi.middleware.cors import CORSMiddleware
 import os
-from datetime import datetime
-import logging
+from dotenv import load_dotenv
 
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Carregar variáveis de ambiente
+load_dotenv()
 
-# Importar agentes do cientista de dados
+# IMPORTS DOS AGENTES REAIS - OBRIGATÓRIOS
 try:
-    import sys
-    sys.path.append('./agents')
-    sys.path.append('./tools')
+    from agents import agente_revisor
+    from tools import preenchimento, commit_multiplas_branchs
+    AGENTS_AVAILABLE = True
+    print("✅ Agentes reais carregados com sucesso")
     
-    from agents.agente_revisor import executar_analise_repositorio
-    from tools.github_reader import ler_repositorio_github
-    from tools.revisor_geral import analisar_com_gpt
+    # Verificar dependências críticas
+    import openai
+    import github
+    print("✅ Dependências OpenAI e GitHub disponíveis")
     
-    logger.info("✅ Agentes do cientista de dados importados com sucesso")
+    # Verificar variáveis de ambiente
+    if not os.getenv('OPENAI_API_KEY'):
+        print("⚠️  OPENAI_API_KEY não encontrada no .env")
+        AGENTS_AVAILABLE = False
+    if not os.getenv('GITHUB_TOKEN'):
+        print("⚠️  GITHUB_TOKEN não encontrada no .env")
+        AGENTS_AVAILABLE = False
+        
+    if AGENTS_AVAILABLE:
+        print("✅ Configuração completa para agentes reais")
+    else:
+        print("❌ Configuração incompleta - verifique .env")
+        
 except ImportError as e:
-    logger.warning(f"⚠️ Agentes não encontrados, usando simulação: {e}")
-    
-    # Funções simuladas para desenvolvimento
-    def executar_analise_repositorio(repo_url, tipo_analise, instrucoes_extras=""):
-        return {
-            "status": "success",
-            "report": f"Análise simulada para {repo_url} - Tipo: {tipo_analise}",
-            "recommendations": ["Sugestão 1", "Sugestão 2"],
-            "files_analyzed": 15,
-            "issues_found": 3
-        }
-    
-    def ler_repositorio_github(repo_url, branch="main"):
-        return {
-            "files": ["main.py", "utils.py", "config.py"],
-            "total_lines": 1500,
-            "languages": ["Python", "JavaScript"]
-        }
-    
-    def analisar_com_gpt(code, prompt_type):
-        return "Análise GPT simulada para desenvolvimento"
+    print(f"❌ ERRO CRÍTICO: Agentes não encontrados: {e}")
+    print("❌ Execute: pip install PyGithub openai python-dotenv")
+    print("❌ Verifique se os arquivos dos agentes existem:")
+    print("   - agents/agente_revisor.py")
+    print("   - tools/github_reader.py") 
+    print("   - tools/revisor_geral.py")
+    AGENTS_AVAILABLE = False
+    exit(1)  # PARAR EXECUÇÃO - AGENTES SÃO OBRIGATÓRIOS
 
-# Criar aplicação FastAPI
+# --- Modelos de Dados ---
+class StartAnalysisRequest(BaseModel):
+    repo_name: str = Field(..., description="Nome do repositório GitHub (formato: owner/repo)")
+    analysis_type: Literal["design", "relatorio_teste_unitario"] = Field(..., description="Tipo de análise")
+    branch_name: Optional[str] = Field(None, description="Branch específica (opcional)")
+    instrucoes_extras: Optional[str] = Field(None, description="Instruções adicionais")
+
+class UpdateJobRequest(BaseModel):
+    job_id: str = Field(..., description="ID do job")
+    action: Literal["approve", "reject"] = Field(..., description="Ação a ser executada")
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+    progress: int
+    error_details: Optional[str] = None
+    last_updated: float
+
+class StartAnalysisResponse(BaseModel):
+    job_id: str
+    report: str
+    status: str
+
+# --- Configuração do FastAPI ---
 app = FastAPI(
-    title="Agentes Peers - Backend AI",
-    description="Sistema inteligente de análise de código com IA multi-agentes",
-    version="2.0.0",
+    title="Agentes Peers - Backend com IA Real",
+    description="Sistema de análise de código com IA multi-agentes (SEM SIMULAÇÃO)",
+    version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
-# Configurar CORS
+# Configuração CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
-        "https://agentes-peers.vercel.app",  # Para produção
+        "https://your-frontend-domain.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Armazenamento em memória (em produção, usar Redis/PostgreSQL)
-jobs_storage: Dict[str, Dict] = {}
-policies_storage: Dict[str, Dict] = {}
-scheduled_analyses: Dict[str, Dict] = {}
+# Armazenamento em memória dos jobs
+jobs: Dict[str, Dict[str, Any]] = {}
 
-# Models Pydantic
-class StartAnalysisRequest(BaseModel):
-    repo_name: str
-    analysis_type: str  # "design", "relatorio_teste_unitario", "pentest", "custom"
-    branch_name: Optional[str] = "main"
-    instrucoes_extras: Optional[str] = ""
+# --- WORKFLOW REGISTRY COM AGENTES REAIS ---
+WORKFLOW_REGISTRY = {
+    "design": {
+        "description": "Análise de design e refatoração usando agentes reais",
+        "agent_analysis_type": "design",  # Tipo para análise inicial
+        "steps": [
+            {
+                "status": "refactoring_code", 
+                "message": "Executando refatoração com IA...", 
+                "agent_type": "refatoracao",
+                "duration": 15
+            },
+            {
+                "status": "grouping_commits", 
+                "message": "Organizando commits por tema...", 
+                "agent_type": "agrupamento_design",
+                "duration": 8
+            },
+            {
+                "status": "populating_data", 
+                "message": "Aplicando mudanças no código...", 
+                "agent_type": None,  # Usar ferramenta de preenchimento
+                "duration": 10
+            },
+            {
+                "status": "committing_to_github", 
+                "message": "Criando commits organizados...", 
+                "agent_type": None,  # Usar ferramenta de commit
+                "duration": 12
+            }
+        ]
+    },
+    "relatorio_teste_unitario": {
+        "description": "Geração de testes unitários usando agentes reais",
+        "agent_analysis_type": "design",  # Análise inicial para entender código
+        "steps": [
+            {
+                "status": "writing_unit_tests", 
+                "message": "Gerando testes unitários com IA...", 
+                "agent_type": "escrever_testes",
+                "duration": 20
+            },
+            {
+                "status": "grouping_tests", 
+                "message": "Organizando estrutura de testes...", 
+                "agent_type": "agrupamento_testes",
+                "duration": 8
+            },
+            {
+                "status": "populating_data", 
+                "message": "Aplicando testes no projeto...", 
+                "agent_type": None,
+                "duration": 10
+            },
+            {
+                "status": "committing_to_github", 
+                "message": "Commitando testes organizados...", 
+                "agent_type": None,
+                "duration": 10
+            }
+        ]
+    }
+}
 
-class UpdateJobRequest(BaseModel):
-    job_id: str
-    action: str  # "approve", "reject"
+# --- Funções dos Agentes Reais ---
 
-class ScheduledAnalysisRequest(BaseModel):
-    name: str
-    repository: str
-    branch: str
-    analysis_type: str
-    frequency: str
-    custom_frequency: Optional[str] = None
-    next_run: Optional[str] = None
+async def execute_real_analysis_step(job_id: str, step: Dict[str, Any], job_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Executa uma etapa real da análise usando os agentes"""
+    try:
+        print(f"[{job_id}] Executando etapa: {step['status']}")
+        
+        if step.get("agent_type"):
+            # Executar agente real
+            print(f"[{job_id}] Chamando agente: {step['agent_type']}")
+            
+            resultado = agente_revisor.main(
+                tipo_analise=step["agent_type"],
+                repositorio=job_data["repo_name"],
+                nome_branch=job_data.get("branch_name"),
+                instrucoes_extras=job_data.get("instrucoes_extras", "")
+            )
+            
+            print(f"[{job_id}] ✅ Agente executado com sucesso")
+            return {
+                "status": "success",
+                "result": resultado,
+                "message": f"Etapa {step['status']} concluída com agente {step['agent_type']}"
+            }
+            
+        else:
+            # Executar ferramenta específica
+            if step["status"] == "populating_data":
+                print(f"[{job_id}] Aplicando mudanças com ferramenta de preenchimento")
+                resultado = preenchimento.main()
+                
+            elif step["status"] == "committing_to_github":
+                print(f"[{job_id}] Criando commits com ferramenta de commit")
+                resultado = commit_multiplas_branchs.main()
+                
+            else:
+                resultado = {"status": "completed", "message": "Etapa processada"}
+            
+            print(f"[{job_id}] ✅ Ferramenta executada com sucesso")
+            return {
+                "status": "success", 
+                "result": resultado,
+                "message": f"Etapa {step['status']} concluída"
+            }
+            
+    except Exception as e:
+        print(f"[{job_id}] ❌ Erro na etapa {step['status']}: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": f"Falha na etapa {step['status']}"
+        }
 
-# Funções auxiliares
-def generate_job_id() -> str:
-    return str(uuid.uuid4())
-
-def get_current_timestamp() -> float:
-    return time.time()
-
-async def simulate_analysis_progress(job_id: str):
-    """Simula o progresso da análise após aprovação"""
-    if job_id not in jobs_storage:
+async def execute_full_workflow(job_id: str):
+    """Executa workflow completo com agentes reais"""
+    if not AGENTS_AVAILABLE:
+        print(f"[{job_id}] ❌ Agentes não disponíveis")
+        jobs[job_id].update({
+            "status": "failed",
+            "message": "Agentes não disponíveis - configure .env",
+            "progress": 0,
+            "last_updated": time.time()
+        })
         return
     
-    # Etapas do processo de análise
-    analysis_steps = [
-        {"status": "workflow_started", "message": "Iniciando fluxo de análise...", "progress": 30, "duration": 2},
-        {"status": "reading_repository", "message": "Lendo arquivos do repositório...", "progress": 40, "duration": 3},
-        {"status": "analyzing_code", "message": "Analisando código com IA...", "progress": 60, "duration": 5},
-        {"status": "generating_recommendations", "message": "Gerando recomendações...", "progress": 80, "duration": 3},
-        {"status": "preparing_refactoring", "message": "Preparando refatorações...", "progress": 90, "duration": 2},
-        {"status": "completed", "message": "Análise concluída com sucesso!", "progress": 100, "duration": 1}
-    ]
-    
-    for step in analysis_steps:
-        if job_id not in jobs_storage:
-            break
+    try:
+        job = jobs.get(job_id)
+        if not job:
+            print(f"[{job_id}] ❌ Job não encontrado")
+            return
+        
+        workflow = WORKFLOW_REGISTRY.get(job["analysis_type"])
+        if not workflow:
+            raise ValueError(f"Workflow não encontrado: {job['analysis_type']}")
+        
+        print(f"[{job_id}] 🚀 Iniciando workflow: {workflow['description']}")
+        
+        total_steps = len(workflow["steps"])
+        progress_per_step = 75 / total_steps  # 75% restante dividido pelas etapas
+        current_progress = 25  # Começa em 25% após aprovação
+        
+        # Executar cada etapa
+        for i, step in enumerate(workflow["steps"]):
+            if job_id not in jobs:
+                print(f"[{job_id}] ⚠️ Job removido durante execução")
+                break
             
-        await asyncio.sleep(step["duration"])
+            # Atualizar status
+            current_progress += progress_per_step
+            jobs[job_id].update({
+                "status": step["status"],
+                "message": step["message"],
+                "progress": int(current_progress),
+                "last_updated": time.time()
+            })
+            
+            print(f"[{job_id}] {step['status']}: {step['message']} ({int(current_progress)}%)")
+            
+            # Executar etapa real
+            resultado_etapa = await execute_real_analysis_step(job_id, step, job)
+            
+            if resultado_etapa["status"] == "error":
+                # Falha na etapa
+                jobs[job_id].update({
+                    "status": "failed",
+                    "message": f"Falha: {resultado_etapa['message']}",
+                    "progress": int(current_progress),
+                    "error_details": resultado_etapa.get("error"),
+                    "last_updated": time.time()
+                })
+                print(f"[{job_id}] ❌ Workflow falhou na etapa {step['status']}")
+                return
+            
+            # Simular tempo de processamento real
+            await asyncio.sleep(min(step["duration"], 5))  # Máximo 5s por etapa para demo
         
-        jobs_storage[job_id].update({
-            "status": step["status"],
-            "message": step["message"],
-            "progress": step["progress"],
-            "last_updated": get_current_timestamp()
-        })
+        # Finalizar com sucesso
+        if job_id in jobs:
+            jobs[job_id].update({
+                "status": "completed",
+                "message": "Análise concluída com agentes reais!",
+                "progress": 100,
+                "last_updated": time.time()
+            })
+            print(f"[{job_id}] ✅ Workflow concluído com sucesso")
         
-        logger.info(f"Job {job_id}: {step['status']} - {step['message']}")
+    except Exception as e:
+        print(f"[{job_id}] ❌ Erro no workflow: {e}")
+        if job_id in jobs:
+            jobs[job_id].update({
+                "status": "failed",
+                "message": f"Erro na execução: {str(e)}",
+                "progress": 0,
+                "error_details": str(e),
+                "last_updated": time.time()
+            })
 
-# =============================================================================
-# ENDPOINTS PRINCIPAIS
-# =============================================================================
+def generate_initial_report(repo_name: str, analysis_type: str, instrucoes_extras: str = "") -> str:
+    """Gera relatório inicial usando agente real"""
+    if not AGENTS_AVAILABLE:
+        return "❌ Agentes não disponíveis. Configure OPENAI_API_KEY e GITHUB_TOKEN no .env"
+    
+    try:
+        print(f"🤖 Gerando relatório inicial para {repo_name} (tipo: {analysis_type})")
+        
+        # Usar agente real para análise inicial
+        workflow = WORKFLOW_REGISTRY.get(analysis_type)
+        agent_type = workflow.get("agent_analysis_type", "design")
+        
+        resultado = agente_revisor.main(
+            tipo_analise=agent_type,
+            repositorio=repo_name,
+            instrucoes_extras=instrucoes_extras or "Análise inicial para aprovação"
+        )
+        
+        # Extrair relatório do resultado
+        if resultado and "resultado" in resultado:
+            if isinstance(resultado["resultado"], dict) and "reposta_final" in resultado["resultado"]:
+                return resultado["resultado"]["reposta_final"]
+            elif isinstance(resultado["resultado"], str):
+                return resultado["resultado"]
+        
+        return "Relatório gerado com sucesso. Código analisado e pronto para processamento."
+        
+    except Exception as e:
+        print(f"❌ Erro ao gerar relatório inicial: {e}")
+        return f"❌ Erro na análise inicial: {str(e)}\n\nVerifique:\n- OPENAI_API_KEY no .env\n- GITHUB_TOKEN no .env\n- Acesso ao repositório {repo_name}"
+
+# --- Endpoints da API ---
 
 @app.get("/")
 async def root():
     return {
-        "message": "🚀 Backend Agentes Peers funcionando!",
+        "message": "Backend Agentes Peers com IA Real funcionando!",
+        "version": "3.0.0",
         "status": "ok",
-        "version": "2.0.0",
-        "features": [
-            "Análise de código com IA",
-            "Múltiplos tipos de análise",
-            "Integração com GitHub",
-            "Políticas customizáveis",
-            "Análises agendadas"
-        ]
+        "agents_status": "real_agents" if AGENTS_AVAILABLE else "no_agents",
+        "environment": os.getenv("ENVIRONMENT", "development")
     }
 
 @app.get("/health")
 async def health_check():
+    status = "healthy" if AGENTS_AVAILABLE else "unhealthy"
     return {
-        "status": "healthy",
-        "message": "Backend está funcionando perfeitamente",
-        "timestamp": datetime.now().isoformat(),
+        "status": status,
+        "message": "Backend funcionando com agentes reais" if AGENTS_AVAILABLE else "Agentes não disponíveis",
         "environment": os.getenv("ENVIRONMENT", "development"),
-        "agents_loaded": True  # Verificar se os agentes estão carregados
+        "agents_available": AGENTS_AVAILABLE,
+        "openai_configured": bool(os.getenv('OPENAI_API_KEY')),
+        "github_configured": bool(os.getenv('GITHUB_TOKEN'))
     }
 
-@app.post("/start-analysis")
-async def start_analysis(request: StartAnalysisRequest, background_tasks: BackgroundTasks):
-    """Inicia uma nova análise de código"""
+@app.post("/start-analysis", response_model=StartAnalysisResponse)
+async def start_analysis(request: StartAnalysisRequest):
+    """Inicia uma nova análise usando agentes reais"""
     try:
-        job_id = generate_job_id()
-        
         # Validar entrada
-        if not request.repo_name or not request.analysis_type:
-            raise HTTPException(status_code=400, detail="repo_name e analysis_type são obrigatórios")
+        if not request.repo_name.strip():
+            raise HTTPException(status_code=400, detail="Nome do repositório é obrigatório")
         
-        # Executar análise inicial (rápida)
-        logger.info(f"Iniciando análise para {request.repo_name} - Tipo: {request.analysis_type}")
-        
-        # Chamar agente do cientista de dados
-        try:
-            analysis_result = executar_analise_repositorio(
-                repo_url=request.repo_name,
-                tipo_analise=request.analysis_type,
-                instrucoes_extras=request.instrucoes_extras or ""
+        if not AGENTS_AVAILABLE:
+            raise HTTPException(
+                status_code=503, 
+                detail="Agentes não disponíveis. Configure OPENAI_API_KEY e GITHUB_TOKEN no .env"
             )
-            
-            # Gerar relatório baseado no resultado
-            if request.analysis_type == "design":
-                report = generate_design_report(request.repo_name, analysis_result)
-            elif request.analysis_type == "relatorio_teste_unitario":
-                report = generate_test_report(request.repo_name, analysis_result)
-            elif request.analysis_type == "pentest":
-                report = generate_security_report(request.repo_name, analysis_result)
-            else:
-                report = generate_custom_report(request.repo_name, analysis_result, request.analysis_type)
-                
-        except Exception as e:
-            logger.error(f"Erro na análise: {e}")
-            # Fallback para relatório simulado
-            report = generate_fallback_report(request.repo_name, request.analysis_type)
         
-        # Criar job
-        job_data = {
+        # Criar novo job
+        job_id = str(uuid.uuid4())
+        
+        print(f"🎯 Iniciando análise real: {job_id} - {request.analysis_type} - {request.repo_name}")
+        
+        # Gerar relatório inicial usando agente real
+        report = generate_initial_report(
+            request.repo_name, 
+            request.analysis_type, 
+            request.instrucoes_extras
+        )
+        
+        # Criar job no armazenamento
+        jobs[job_id] = {
             "job_id": job_id,
             "repo_name": request.repo_name,
             "analysis_type": request.analysis_type,
             "branch_name": request.branch_name,
             "instrucoes_extras": request.instrucoes_extras,
             "status": "pending_approval",
-            "message": "Análise inicial concluída. Aguardando aprovação para implementação.",
-            "progress": 25,
+            "message": "Relatório gerado com IA real. Aguardando aprovação...",
+            "progress": 10,
             "report": report,
-            "created_at": get_current_timestamp(),
-            "last_updated": get_current_timestamp()
+            "created_at": time.time(),
+            "last_updated": time.time()
         }
         
-        jobs_storage[job_id] = job_data
+        print(f"✅ Análise criada: {job_id} - {request.analysis_type} - {request.repo_name}")
         
-        logger.info(f"Job {job_id} criado com sucesso")
-        
-        return {
-            "job_id": job_id,
-            "report": report,
-            "status": "pending_approval",
-            "message": "Análise concluída! Revise o relatório e aprove para prosseguir com a implementação."
-        }
+        return StartAnalysisResponse(
+            job_id=job_id,
+            report=report,
+            status="pending_approval"
+        )
         
     except Exception as e:
-        logger.error(f"Erro ao iniciar análise: {e}")
+        print(f"❌ Erro ao criar análise: {e}")
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
-@app.get("/status/{job_id}")
-async def get_job_status(job_id: str):
-    """Obtém o status de um job"""
-    if job_id not in jobs_storage:
+@app.get("/status/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str = Path(..., description="ID do job")):
+    """Obtém o status atual de um job"""
+    if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job não encontrado")
     
-    job = jobs_storage[job_id]
-    return {
-        "job_id": job_id,
-        "status": job["status"],
-        "message": job["message"],
-        "progress": job["progress"],
-        "last_updated": job["last_updated"]
-    }
+    job = jobs[job_id]
+    return JobStatusResponse(
+        job_id=job["job_id"],
+        status=job["status"],
+        message=job["message"],
+        progress=job["progress"],
+        error_details=job.get("error_details"),
+        last_updated=job["last_updated"]
+    )
 
 @app.post("/update-job-status")
 async def update_job_status(request: UpdateJobRequest, background_tasks: BackgroundTasks):
-    """Atualiza status do job (aprovar/rejeitar)"""
-    job_id = request.job_id
-    
-    if job_id not in jobs_storage:
+    """Aprova ou rejeita um job para execução com agentes reais"""
+    if request.job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job não encontrado")
     
-    job = jobs_storage[job_id]
+    job = jobs[request.job_id]
     
     if request.action == "approve":
-        job.update({
+        if not AGENTS_AVAILABLE:
+            raise HTTPException(
+                status_code=503, 
+                detail="Agentes não disponíveis para execução"
+            )
+        
+        # Atualizar status para aprovado
+        jobs[request.job_id].update({
             "status": "approved",
-            "message": "Análise aprovada! Iniciando implementação...",
-            "progress": 30,
-            "last_updated": get_current_timestamp()
+            "message": "Análise aprovada! Iniciando processamento com agentes reais...",
+            "progress": 25,
+            "last_updated": time.time()
         })
         
-        # Iniciar processo em background
-        background_tasks.add_task(simulate_analysis_progress, job_id)
+        # Iniciar execução real em background
+        background_tasks.add_task(execute_full_workflow, request.job_id)
+        
+        print(f"✅ Job aprovado para execução real: {request.job_id}")
         
         return {
-            "job_id": job_id,
+            "job_id": request.job_id,
             "status": "approved",
-            "message": "Implementação iniciada em background"
+            "message": "Análise aprovada e iniciada com agentes reais"
         }
-        
+    
     elif request.action == "reject":
-        job.update({
+        jobs[request.job_id].update({
             "status": "rejected",
             "message": "Análise rejeitada pelo usuário",
             "progress": 0,
-            "last_updated": get_current_timestamp()
+            "last_updated": time.time()
         })
         
+        print(f"❌ Job rejeitado: {request.job_id}")
+        
         return {
-            "job_id": job_id,
+            "job_id": request.job_id,
             "status": "rejected",
             "message": "Análise rejeitada"
         }
-    
-    else:
-        raise HTTPException(status_code=400, detail="Ação inválida. Use 'approve' ou 'reject'")
 
-# =============================================================================
-# ENDPOINTS DE POLÍTICAS
-# =============================================================================
-
-@app.post("/upload-policy")
-async def upload_policy(
-    name: str = Form(...),
-    description: str = Form(...),
-    file: UploadFile = File(...)
-):
-    """Upload de política da empresa"""
-    try:
-        # Validar arquivo
-        if file.content_type not in ["text/plain", "application/pdf", "text/markdown"]:
-            raise HTTPException(status_code=400, detail="Tipo de arquivo não suportado")
-        
-        # Ler conteúdo
-        content = await file.read()
-        
-        # Salvar política
-        policy_id = generate_job_id()
-        policy_data = {
-            "id": policy_id,
-            "name": name,
-            "description": description,
-            "filename": file.filename,
-            "content": content.decode("utf-8") if file.content_type.startswith("text") else content,
-            "uploaded_at": datetime.now().isoformat()
-        }
-        
-        policies_storage[policy_id] = policy_data
-        
-        return {
-            "id": policy_id,
-            "message": "Política enviada com sucesso!"
-        }
-        
-    except Exception as e:
-        logger.error(f"Erro no upload: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro no upload: {str(e)}")
-
-@app.get("/policies")
-async def get_policies():
-    """Lista todas as políticas"""
-    return [
-        {
-            "id": policy["id"],
-            "name": policy["name"],
-            "description": policy["description"],
-            "uploaded_at": policy["uploaded_at"]
-        }
-        for policy in policies_storage.values()
-    ]
-
-@app.delete("/policies/{policy_id}")
-async def delete_policy(policy_id: str):
-    """Remove uma política"""
-    if policy_id not in policies_storage:
-        raise HTTPException(status_code=404, detail="Política não encontrada")
-    
-    del policies_storage[policy_id]
-    return {"message": "Política removida com sucesso"}
-
-# =============================================================================
-# ENDPOINTS DE ANÁLISES AGENDADAS
-# =============================================================================
-
-@app.post("/scheduled-analyses")
-async def create_scheduled_analysis(request: ScheduledAnalysisRequest):
-    """Cria uma análise agendada"""
-    analysis_id = generate_job_id()
-    
-    analysis_data = {
-        "id": analysis_id,
-        "name": request.name,
-        "repository": request.repository,
-        "branch": request.branch,
-        "analysis_type": request.analysis_type,
-        "frequency": request.frequency,
-        "custom_frequency": request.custom_frequency,
-        "next_run": request.next_run or datetime.now().isoformat(),
-        "created_at": datetime.now().isoformat(),
-        "status": "active"
-    }
-    
-    scheduled_analyses[analysis_id] = analysis_data
-    
+@app.get("/jobs")
+async def list_jobs():
+    """Lista todos os jobs"""
     return {
-        "id": analysis_id,
-        "message": "Análise agendada criada com sucesso!"
+        "jobs": list(jobs.values()),
+        "total": len(jobs),
+        "agents_available": AGENTS_AVAILABLE
     }
 
-@app.get("/scheduled-analyses")
-async def get_scheduled_analyses():
-    """Lista análises agendadas"""
-    return list(scheduled_analyses.values())
-
-@app.delete("/scheduled-analyses/{analysis_id}")
-async def delete_scheduled_analysis(analysis_id: str):
-    """Remove análise agendada"""
-    if analysis_id not in scheduled_analyses:
-        raise HTTPException(status_code=404, detail="Análise agendada não encontrada")
+@app.delete("/jobs/{job_id}")
+async def delete_job(job_id: str):
+    """Remove um job"""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job não encontrado")
     
-    del scheduled_analyses[analysis_id]
-    return {"message": "Análise agendada removida com sucesso"}
+    del jobs[job_id]
+    print(f"🗑️ Job removido: {job_id}")
+    return {"message": "Job removido com sucesso"}
 
-# =============================================================================
-# FUNÇÕES DE GERAÇÃO DE RELATÓRIOS
-# =============================================================================
-
-def generate_design_report(repo_name: str, analysis_result: dict) -> str:
-    return f"""# 🎨 Relatório de Análise de Design - {repo_name}
-
-## 📊 Resumo Executivo
-A análise arquitetural do repositório **{repo_name}** identificou oportunidades estratégicas de melhoria na estrutura e organização do código.
-
-## 🔍 Principais Descobertas
-
-### 1. Arquitetura e Estrutura
-- ✅ **Organização de pastas**: Estrutura base adequada
-- ⚠️ **Modularidade**: Oportunidades de refatoração identificadas
-- 🔧 **Separação de responsabilidades**: Melhorias recomendadas
-
-### 2. Padrões de Design
-- **Princípios SOLID**: Aplicação parcial detectada
-- **Padrões GoF**: Recomendação para Strategy, Factory e Adapter
-- **Clean Architecture**: Separação de camadas sugerida
-
-### 3. Qualidade do Código
-- **Complexidade ciclomática**: Moderada
-- **Manutenibilidade**: Boa com melhorias pontuais
-- **Testabilidade**: Pode ser significativamente aprimorada
-
-## 🎯 Recomendações Prioritárias
-
-1. **Implementar injeção de dependências**
-2. **Separar responsabilidades em módulos menores**
-3. **Adicionar interfaces para desacoplamento**
-4. **Melhorar cobertura de testes automatizados**
-5. **Documentar arquitetura e decisões técnicas**
-
-## 🚀 Próximos Passos
-
-Se aprovado, o sistema irá automaticamente:
-1. ✨ Aplicar refatorações baseadas em melhores práticas
-2. 📝 Criar Pull Requests organizados por tema
-3. 🧪 Gerar testes automatizados
-4. 📚 Documentar todas as mudanças implementadas
-
----
-**Status**: ⏳ Aguardando aprovação para prosseguir com implementação automática.
-"""
-
-def generate_test_report(repo_name: str, analysis_result: dict) -> str:
-    return f"""# 🧪 Relatório de Análise de Testes - {repo_name}
-
-## 📈 Análise de Cobertura Atual
-Análise detalhada do repositório **{repo_name}** para identificar gaps críticos na cobertura de testes.
-
-## 📊 Situação Atual
-- **Cobertura estimada**: 45%
-- **Arquivos sem testes**: 12 arquivos críticos
-- **Funções descobertas**: 8 funções principais
-- **Casos de borda identificados**: 15 cenários
-
-## 🎯 Estratégia de Testes Recomendada
-
-### 1. Testes de Unidade
-- ✅ Funções principais do core business
-- ✅ Validações de entrada e saída
-- ✅ Tratamento robusto de erros e exceções
-
-### 2. Testes de Integração
-- 🔌 APIs e endpoints críticos
-- 💾 Conexões com banco de dados
-- 🌐 Integração com serviços externos
-
-### 3. Testes de Casos Extremos
-- ❌ Valores nulos e vazios
-- 📏 Limites de entrada
-- 💥 Cenários de falha e recuperação
-
-## 🚀 Plano de Implementação
-
-### Prioridade Alta 🔴
-- Funções críticas de negócio
-- Endpoints de API principais
-- Validações de segurança
-
-### Prioridade Média 🟡
-- Utilitários e helpers
-- Formatações e conversões
-- Integrações secundárias
-
-### Prioridade Baixa 🟢
-- Funções auxiliares
-- Logs e monitoramento
-- Configurações
-
-## 📋 Próximos Passos
-
-Se aprovado, o sistema irá:
-1. 🧪 Gerar automaticamente testes unitários
-2. 📊 Criar relatório de cobertura detalhado
-3. 🔧 Configurar pipeline de testes
-4. 📈 Implementar métricas de qualidade
-
----
-**Meta**: Atingir 85% de cobertura de testes em 2 semanas.
-"""
-
-def generate_security_report(repo_name: str, analysis_result: dict) -> str:
-    return f"""# 🔒 Relatório de Análise de Segurança - {repo_name}
-
-## 🛡️ Resumo de Segurança
-Análise de vulnerabilidades e boas práticas de segurança no repositório **{repo_name}**.
-
-## ⚠️ Vulnerabilidades Identificadas
-
-### Críticas 🔴
-- **Exposição de credenciais**: Possíveis chaves em arquivos de configuração
-- **Validação de entrada**: Falta sanitização em formulários
-- **Autenticação**: Implementação de autenticação pode ser fortalecida
-
-### Moderadas 🟡
-- **Logs de segurança**: Implementação incompleta de auditoria
-- **Criptografia**: Algoritmos desatualizados em algumas funcionalidades
-- **Dependências**: Packages com vulnerabilidades conhecidas
-
-### Baixas 🟢
-- **Headers de segurança**: Headers HTTP de segurança ausentes
-- **Rate limiting**: Proteção contra ataques de força bruta
-- **CORS**: Configuração muito permissiva
-
-## 🎯 Recomendações de Segurança
-
-### 1. Proteção de Dados
-- Implementar criptografia end-to-end
-- Configurar vault para secrets
-- Aplicar princípio de menor privilégio
-
-### 2. Autenticação e Autorização
-- Multi-factor authentication (MFA)
-- JSON Web Tokens (JWT) seguros
-- Rate limiting personalizado
-
-### 3. Monitoramento
-- Logs de auditoria detalhados
-- Alertas de atividade suspeita
-- Monitoring de integridade
-
-## 🚀 Plano de Mitigação
-
-Se aprovado, o sistema irá:
-1. 🔐 Aplicar patches de segurança automaticamente
-2. 🛡️ Implementar validações robustas
-3. 📊 Configurar monitoramento de segurança
-4. 📋 Criar checklist de segurança para CI/CD
-
----
-**Urgência**: Correção de vulnerabilidades críticas em 48h.
-"""
-
-def generate_custom_report(repo_name: str, analysis_result: dict, analysis_type: str) -> str:
-    return f"""# 🔧 Relatório de Análise Customizada - {repo_name}
-
-## 📝 Tipo de Análise: {analysis_type.title()}
-
-Análise personalizada do repositório **{repo_name}** focada em {analysis_type}.
-
-## 🔍 Descobertas Principais
-
-{analysis_result.get('report', 'Análise detalhada em progresso...')}
-
-## 💡 Recomendações
-
-{' | '.join(analysis_result.get('recommendations', ['Aguardando análise completa']))}
-
-## 📊 Estatísticas
-- **Arquivos analisados**: {analysis_result.get('files_analyzed', 'Calculando...')}
-- **Issues encontrados**: {analysis_result.get('issues_found', 'Analisando...')}
-
-## 🚀 Próximos Passos
-
-Se aprovado, o sistema implementará automaticamente as melhorias identificadas.
-
----
-**Status**: Pronto para implementação.
-"""
-
-def generate_fallback_report(repo_name: str, analysis_type: str) -> str:
-    return f"""# 📋 Relatório de Análise - {repo_name}
-
-## 🔄 Análise em Progresso
-
-O sistema está processando a análise do tipo **{analysis_type}** para o repositório **{repo_name}**.
-
-## ⚡ Status Atual
-- Conectando com repositório
-- Analisando estrutura de arquivos
-- Executando verificações de qualidade
-
-## 🎯 Próximos Passos
-Aguarde a conclusão da análise para ver recomendações detalhadas.
-
----
-**Nota**: Esta é uma análise preliminar. O relatório completo será gerado em breve.
-"""
-
+# --- Executar Servidor ---
 if __name__ == "__main__":
+    if not AGENTS_AVAILABLE:
+        print("❌ ERRO: Não é possível iniciar sem agentes configurados!")
+        print("❌ Configure .env com OPENAI_API_KEY e GITHUB_TOKEN")
+        exit(1)
+        
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
