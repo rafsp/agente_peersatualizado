@@ -1,176 +1,272 @@
 import os
 from github import Github
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
+import logging
+from dataclasses import dataclass
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-def get_github_client():
-    """Inicializa cliente GitHub"""
-    token = os.getenv('GITHUB_TOKEN')
-    if not token:
-        raise ValueError("GITHUB_TOKEN não encontrado no .env")
-    return Github(token)
+@dataclass
+class FileReadResult:
+    """Resultado da leitura de arquivos"""
+    files: Dict[str, str]
+    total_files: int
+    skipped_files: int
+    errors: List[str]
 
-def get_file_extensions_by_analysis(tipo_de_analise: str) -> List[str]:
-    """Define extensões de arquivo por tipo de análise"""
-    extensoes = {
-        'design': ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.cs', '.php', '.rb', '.go', '.jsx', '.tsx'],
-        'pentest': ['.py', '.js', '.ts', '.php', '.java', '.config', '.yml', '.yaml', '.json', '.xml'],
-        'seguranca': ['.py', '.js', '.ts', '.php', '.java', '.config', '.yml', '.yaml', '.dockerfile', '.env.example'],
+class GitHubReaderConfig:
+    """Configurações do GitHub Reader"""
+    MAX_FILES = 50
+    MAX_FILE_SIZE_MB = 1
+    DEFAULT_BRANCH = "main"
+    
+    # Extensões por tipo de análise
+    EXTENSIONS_MAP = {
+        'design': ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.cs', '.php', '.rb', '.go', '.jsx', '.tsx', '.ipynb'],
+        'pentest': ['.py', '.js', '.ts', '.php', '.java', '.config', '.yml', '.yaml', '.json', '.xml', '.ipynb'],
+        'seguranca': ['.py', '.js', '.ts', '.php', '.java', '.config', '.yml', '.yaml', '.dockerfile', '.env.example', '.ipynb'],
         'terraform': ['.tf', '.tfvars', '.hcl', '.tfstate'],
-        'refatoracao': ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.cs', '.jsx', '.tsx'],
+        'refatoracao': ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.cs', '.jsx', '.tsx', '.ipynb'],
         'escrever_testes': ['.py', '.js', '.ts', '.java', '.test.js', '.spec.js', '.test.py'],
-        'agrupamento_design': ['.py', '.js', '.ts', '.java', '.cpp', '.cs'],
-        'agrupamento_testes': ['.py', '.js', '.ts', '.java', '.test.js', '.spec.js']
+        'agrupamento_design': ['.py', '.js', '.ts', '.java', '.cpp', '.cs', '.ipynb'],
+        'agrupamento_testes': ['.py', '.js', '.ts', '.java', '.test.js', '.spec.js'],
+        'relatorio_teste_unitario': ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.go', '.rb', '.php', '.cs', '.ipynb']
     }
-    return extensoes.get(tipo_de_analise, ['.py', '.js', '.ts'])
-
-def should_skip_file(file_path: str) -> bool:
-    """Verifica se arquivo deve ser ignorado"""
-    skip_patterns = [
+    
+    # Padrões de arquivos/diretórios a serem ignorados
+    SKIP_PATTERNS = [
         'node_modules/', 'venv/', 'env/', '__pycache__/', '.git/',
         'build/', 'dist/', 'target/', '.idea/', '.vscode/',
         'coverage/', '.nyc_output/', '.pytest_cache/',
         'package-lock.json', 'yarn.lock', '.gitignore',
         '.env', '.env.local', '.env.production'
     ]
-    
-    file_path_lower = file_path.lower()
-    return any(pattern in file_path_lower for pattern in skip_patterns)
 
-def _leitura_recursiva_com_debug(repo, path: str, extensoes: List[str], max_files: int = 50, current_count: int = 0) -> Dict[str, str]:
-    """Lê arquivos recursivamente do repositório"""
-    arquivos_lidos = {}
+class GitHubReader:
+    """Classe principal para leitura de repositórios GitHub"""
     
-    if current_count >= max_files:
-        print(f"⚠️ Limite de {max_files} arquivos atingido")
-        return arquivos_lidos
+    def __init__(self, config: GitHubReaderConfig = None):
+        self.config = config or GitHubReaderConfig()
+        self._github_client = None
     
-    try:
-        print(f"📂 Explorando diretório: {path}")
-        contents = repo.get_contents(path)
+    def get_github_client(self) -> Github:
+        """Inicializa cliente GitHub (lazy loading)"""
+        if self._github_client is None:
+            token = os.getenv('GITHUB_TOKEN')
+            if not token:
+                raise ValueError("GITHUB_TOKEN não encontrado no .env")
+            self._github_client = Github(token)
+            logger.info("✅ Cliente GitHub inicializado")
+        return self._github_client
+
+    def get_file_extensions_by_analysis(self, tipo_de_analise: str) -> List[str]:
+        """Define extensões de arquivo por tipo de análise"""
+        extensions = self.config.EXTENSIONS_MAP.get(tipo_de_analise.lower())
+        if extensions is None:
+            logger.warning(f"⚠️ Tipo de análise '{tipo_de_analise}' não encontrado, usando extensões padrão")
+            return ['.py', '.js', '.ts']
+        return extensions
+
+    def should_skip_file(self, file_path: str) -> bool:
+        """Verifica se arquivo deve ser ignorado"""
+        file_path_lower = file_path.lower()
+        return any(pattern in file_path_lower for pattern in self.config.SKIP_PATTERNS)
+
+    def _read_file_content(self, content) -> Tuple[Optional[str], Optional[str]]:
+        """Lê o conteúdo de um arquivo específico
         
-        if not isinstance(contents, list):
-            contents = [contents]
+        Returns:
+            Tuple[conteudo, erro]: (conteúdo do arquivo ou None, mensagem de erro ou None)
+        """
+        try:
+            # Verificar tamanho do arquivo
+            max_size_bytes = self.config.MAX_FILE_SIZE_MB * 1024 * 1024
+            if content.size > max_size_bytes:
+                return None, f"Arquivo muito grande: {content.size} bytes (limite: {max_size_bytes})"
             
-        # Ordenar conteúdos: arquivos primeiro, depois diretórios
-        files = [c for c in contents if c.type == "file"]
-        dirs = [c for c in contents if c.type == "dir"]
+            arquivo_conteudo = content.decoded_content.decode('utf-8')
+            logger.debug(f"✅ Lido: {content.path} ({content.size} bytes)")
+            return arquivo_conteudo, None
+            
+        except UnicodeDecodeError:
+            return None, f"Erro de encoding: {content.path}"
+        except Exception as e:
+            return None, f"Erro ao ler {content.path}: {str(e)}"
+
+    def _read_directory_recursive(self, repo, path: str, extensoes: List[str], 
+                                  result: FileReadResult, current_count: int = 0) -> None:
+        """Lê arquivos recursivamente do repositório"""
         
-        # Processar arquivos primeiro
-        for content in files:
-            if len(arquivos_lidos) + current_count >= max_files:
-                break
+        if current_count >= self.config.MAX_FILES:
+            logger.warning(f"⚠️ Limite de {self.config.MAX_FILES} arquivos atingido")
+            return
+        
+        try:
+            logger.debug(f"📂 Explorando diretório: {path}")
+            contents = repo.get_contents(path)
+            
+            if not isinstance(contents, list):
+                contents = [contents]
                 
-            # Verificar se deve pular arquivo
-            if should_skip_file(content.path):
-                continue
-                
-            # Verificar extensão
-            if any(content.name.endswith(ext) for ext in extensoes):
-                try:
-                    # Verificar tamanho do arquivo (limite de 1MB)
-                    if content.size > 1024 * 1024:  # 1MB
-                        print(f"⚠️ Arquivo muito grande ignorado: {content.path} ({content.size} bytes)")
-                        continue
-                        
-                    arquivo_conteudo = content.decoded_content.decode('utf-8')
-                    arquivos_lidos[content.path] = arquivo_conteudo
-                    print(f"✅ Lido: {content.path} ({content.size} bytes)")
+            # Separar arquivos e diretórios
+            files = [c for c in contents if c.type == "file"]
+            dirs = [c for c in contents if c.type == "dir"]
+            
+            # Processar arquivos primeiro
+            for content in files:
+                if len(result.files) >= self.config.MAX_FILES:
+                    break
                     
-                except UnicodeDecodeError:
-                    print(f"⚠️ Erro de encoding ignorado: {content.path}")
+                # Verificar se deve pular arquivo
+                if self.should_skip_file(content.path):
+                    result.skipped_files += 1
+                    continue
+                    
+                # Verificar extensão
+                if any(content.name.endswith(ext) for ext in extensoes):
+                    file_content, error = self._read_file_content(content)
+                    
+                    if file_content is not None:
+                        result.files[content.path] = file_content
+                        result.total_files += 1
+                        logger.info(f"✅ Arquivo processado: {content.path}")
+                    else:
+                        result.errors.append(error)
+                        result.skipped_files += 1
+                        logger.warning(f"⚠️ {error}")
+            
+            # Processar diretórios recursivamente
+            for content in dirs:
+                if len(result.files) >= self.config.MAX_FILES:
+                    break
+                    
+                # Verificar se deve pular diretório
+                if self.should_skip_file(content.path + '/'):
+                    continue
+                    
+                try:
+                    self._read_directory_recursive(
+                        repo, content.path, extensoes, result, len(result.files)
+                    )
                 except Exception as e:
-                    print(f"⚠️ Erro ao ler {content.path}: {e}")
+                    error_msg = f"Erro ao acessar diretório {content.path}: {str(e)}"
+                    result.errors.append(error_msg)
+                    logger.warning(f"⚠️ {error_msg}")
+                            
+        except Exception as e:
+            error_msg = f"Erro ao acessar {path}: {str(e)}"
+            result.errors.append(error_msg)
+            logger.error(f"❌ {error_msg}")
+
+    def read_repository(self, repo: str, tipo_de_analise: str, branch: str = None) -> FileReadResult:
+        """Lê arquivos do repositório especificado
         
-        # Processar diretórios recursivamente
-        for content in dirs:
-            if len(arquivos_lidos) + current_count >= max_files:
-                break
-                
-            # Verificar se deve pular diretório
-            if should_skip_file(content.path + '/'):
-                continue
-                
+        Args:
+            repo: Nome do repositório (ex: 'usuario/repo')
+            tipo_de_analise: Tipo de análise para definir extensões
+            branch: Branch a ser lida (padrão: branch principal do repo)
+            
+        Returns:
+            FileReadResult: Resultado da leitura com arquivos e metadados
+        """
+        try:
+            logger.info(f"🔍 Iniciando leitura do repositório: {repo}")
+            logger.info(f"📂 Tipo de análise: {tipo_de_analise}")
+            
+            # Obter cliente GitHub
+            github_client = self.get_github_client()
+            
+            # Obter repositório
             try:
-                sub_arquivos = _leitura_recursiva_com_debug(
-                    repo, 
-                    content.path, 
-                    extensoes, 
-                    max_files, 
-                    current_count + len(arquivos_lidos)
-                )
-                arquivos_lidos.update(sub_arquivos)
+                repository = github_client.get_repo(repo)
+                logger.info(f"✅ Repositório encontrado: {repository.full_name}")
             except Exception as e:
-                print(f"⚠️ Erro ao acessar diretório {content.path}: {e}")
-                        
-    except Exception as e:
-        print(f"❌ Erro ao acessar {path}: {e}")
-        
-    return arquivos_lidos
+                raise ValueError(f"Repositório {repo} não encontrado ou sem acesso: {str(e)}")
+            
+            # Definir branch
+            if branch is None:
+                branch = repository.default_branch
+                logger.info(f"🌿 Usando branch padrão: {branch}")
+            else:
+                # Verificar se branch existe
+                try:
+                    repository.get_branch(branch)
+                    logger.info(f"✅ Branch '{branch}' encontrada")
+                except Exception:
+                    logger.warning(f"⚠️ Branch '{branch}' não encontrada, usando branch padrão")
+                    branch = repository.default_branch
+                    logger.info(f"🌿 Usando branch padrão: {branch}")
+            
+            # Obter extensões de arquivo
+            extensoes = self.get_file_extensions_by_analysis(tipo_de_analise)
+            logger.info(f"📝 Extensões a serem lidas: {extensoes}")
+            
+            # Inicializar resultado
+            result = FileReadResult(files={}, total_files=0, skipped_files=0, errors=[])
+            
+            # Ler arquivos
+            logger.info("📖 Iniciando leitura de arquivos...")
+            self._read_directory_recursive(repository, "", extensoes, result)
+            
+            # Se não encontrou arquivos, tentar com extensões básicas
+            if not result.files:
+                logger.warning("⚠️ Nenhum arquivo encontrado com extensões específicas")
+                extensoes_basicas = ['.py', '.js', '.ts', '.java', '.ipynb']
+                logger.info(f"🔄 Tentando com extensões básicas: {extensoes_basicas}")
+                
+                result = FileReadResult(files={}, total_files=0, skipped_files=0, errors=[])
+                self._read_directory_recursive(repository, "", extensoes_basicas, result)
+            
+            # Log dos resultados
+            logger.info(f"📊 Leitura concluída:")
+            logger.info(f"   - Arquivos processados: {result.total_files}")
+            logger.info(f"   - Arquivos ignorados: {result.skipped_files}")
+            logger.info(f"   - Erros: {len(result.errors)}")
+            
+            if result.files:
+                logger.info("📋 Arquivos encontrados:")
+                for i, arquivo in enumerate(list(result.files.keys())[:10]):
+                    logger.info(f"   - {arquivo}")
+                if len(result.files) > 10:
+                    logger.info(f"   ... e mais {len(result.files) - 10} arquivos")
+            else:
+                raise ValueError(f"Nenhum arquivo de código encontrado no repositório {repo}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Erro na leitura do repositório: {str(e)}")
+            raise
+
+# Instância global para compatibilidade
+_reader = GitHubReader()
+
+def get_github_client():
+    """Função de compatibilidade - Inicializa cliente GitHub"""
+    return _reader.get_github_client()
+
+def get_file_extensions_by_analysis(tipo_de_analise: str) -> List[str]:
+    """Função de compatibilidade - Define extensões de arquivo por tipo de análise"""
+    return _reader.get_file_extensions_by_analysis(tipo_de_analise)
+
+def should_skip_file(file_path: str) -> bool:
+    """Função de compatibilidade - Verifica se arquivo deve ser ignorado"""
+    return _reader.should_skip_file(file_path)
 
 def main(repo: str, tipo_de_analise: str, branch: str = "main") -> Dict[str, str]:
-    """Função principal para leitura do repositório"""
+    """Função principal para leitura do repositório - COMPATIBILIDADE"""
     try:
-        print(f"🔍 Iniciando leitura do repositório: {repo}")
-        print(f"📂 Tipo de análise: {tipo_de_analise}")
-        print(f"🌿 Branch: {branch}")
-        
-        # Obter cliente GitHub
-        github_client = get_github_client()
-        
-        # Obter repositório
-        try:
-            repository = github_client.get_repo(repo)
-            print(f"✅ Repositório encontrado: {repository.full_name}")
-        except Exception as e:
-            print(f"❌ Erro ao acessar repositório {repo}: {e}")
-            raise ValueError(f"Repositório {repo} não encontrado ou sem acesso")
-        
-        # Verificar se branch existe
-        try:
-            if branch != "main":
-                repository.get_branch(branch)
-                print(f"✅ Branch '{branch}' encontrada")
-        except Exception:
-            print(f"⚠️ Branch '{branch}' não encontrada, usando branch padrão")
-            branch = repository.default_branch
-            print(f"🌿 Usando branch padrão: {branch}")
-        
-        # Obter extensões de arquivo
-        extensoes = get_file_extensions_by_analysis(tipo_de_analise)
-        print(f"📝 Extensões a serem lidas: {extensoes}")
-        
-        # Ler arquivos
-        print("📖 Iniciando leitura de arquivos...")
-        arquivos = _leitura_recursiva_com_debug(repository, "", extensoes, max_files=50)
-        
-        if not arquivos:
-            print("⚠️ Nenhum arquivo encontrado com as extensões especificadas")
-            # Tentar com extensões mais básicas
-            extensoes_basicas = ['.py', '.js', '.ts', '.java']
-            print(f"🔄 Tentando novamente com extensões básicas: {extensoes_basicas}")
-            arquivos = _leitura_recursiva_com_debug(repository, "", extensoes_basicas, max_files=20)
-        
-        print(f"📊 Total de arquivos lidos: {len(arquivos)}")
-        
-        if arquivos:
-            print("📋 Arquivos processados:")
-            for arquivo in list(arquivos.keys())[:10]:  # Mostrar apenas os primeiros 10
-                print(f"   - {arquivo}")
-            if len(arquivos) > 10:
-                print(f"   ... e mais {len(arquivos) - 10} arquivos")
-        else:
-            raise ValueError(f"Nenhum arquivo de código encontrado no repositório {repo}")
-        
-        return arquivos
-        
+        result = _reader.read_repository(repo, tipo_de_analise, branch)
+        return result.files
     except Exception as e:
-        print(f"❌ Erro na leitura do repositório: {e}")
+        logger.error(f"❌ Erro na função main: {str(e)}")
         raise
 
-# Função para compatibilidade com diferentes chamadas
 def ler_repositorio(repo: str, tipo_analise: str = "design", branch: str = "main") -> Dict[str, str]:
     """Função alternativa para compatibilidade"""
     return main(repo, tipo_analise, branch)
